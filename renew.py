@@ -5,11 +5,12 @@ MWS (cloud.puratya.com) 自动续期脚本
 
 原理：MWS 的 Bot/Site 有 7 天倒计时，到期自动停止。
      点一次 Renew 按钮 = POST /api/bots/{id}/renew，把倒计时重置回 7 天。
-     本脚本每天跑一次，把所有 Bot/Site 全部续期，永不停止。
+     本脚本每周一、三、五跑一次，把所有 Bot/Site 全部续期，永不停止。
 
 登录态：__Host-mrtcloud_token（JWT，约 26 天有效，过期需重新登录抓取）
 
-通知：复用 notify.py（Telegram + SMTP 双通道，失败不阻断续期）。
+通知：走 notify-gateway（notify.py 上报结构化结果，网关统一发邮件 + Telegram）。
+     仓库只需配 NOTIFY_URL / NOTIFY_TOKEN，不内置 SMTP / TG。
 依赖：requests（pip install requests）
 """
 
@@ -20,7 +21,7 @@ from datetime import datetime
 
 import requests
 
-from notify import send_notification
+from notify import notify
 
 API = "https://cloud.puratya.com/api"
 
@@ -78,6 +79,14 @@ def renew_one(token, kind, oid):
     return (status == 200), status, body
 
 
+def _report(level, title, content, details):
+    """上报 notify-gateway；失败只打日志，不阻断续期主流程。"""
+    try:
+        notify(title, content, level=level, details=details)
+    except Exception as e:
+        print("::warning::通知上报失败: {}".format(e))
+
+
 def main():
     token = os.environ.get("MWS_TOKEN", "").strip()
     if not token:
@@ -92,7 +101,7 @@ def main():
                    "更新到 GitHub Secret MWS_TOKEN")
         print(title)
         print(content)
-        send_notification(content, title=title)
+        _report("failed", title, content, None)
         sys.exit(1)
     if status != 200:
         print("[✗] 验证 token 异常: HTTP {} {}".format(status, body))
@@ -109,32 +118,48 @@ def main():
     if not items:
         title = "MWS 续期报告 ({}) · 无对象".format(now_str())
         print(title)
-        send_notification("账号下没有 Bot / Site，跳过。", title=title)
+        _report("success", title, "账号下没有 Bot / Site，跳过。", None)
         return
 
     lines = []
     failed = 0
+    detail_items = []
     for kind, oid, name, rem in items:
         if oid is None:
             lines.append("  · {} {}：列表获取失败".format(kind, name))
+            detail_items.append({"id": "unknown", "name": name, "status": "failed",
+                                 "error": "列表获取失败"})
             failed += 1
             continue
         ok, status, body = renew_one(token, kind, oid)
         rem_txt = "，续期前剩 {}h".format(int(rem)) if rem is not None else ""
         if ok:
             lines.append("  · {} {}：续期成功{}".format(kind, name, rem_txt))
+            msg = rem_txt.strip().lstrip("，") if rem is not None else ""
+            detail_items.append({"id": str(oid), "name": name, "status": "success",
+                                 "message": msg})
             print("[✓] {} {} (id:{}) 续期成功{}".format(kind, name, oid, rem_txt))
         else:
             lines.append("  · {} {}：续期失败 HTTP {} {}".format(kind, name, status, body.strip()))
+            detail_items.append({"id": str(oid), "name": name, "status": "failed",
+                                 "error": "HTTP {} {}".format(status, body.strip())})
             failed += 1
             print("[✗] {} {} (id:{}) 续期失败 HTTP {}".format(kind, name, oid, status))
 
     # 2) 汇总 + 通知
+    total = len(items)
+    success = total - failed
+    level = "success" if failed == 0 else "partial"
     status_word = "完成" if failed == 0 else "部分失败"
     title = "MWS 续期报告 ({}) · {}".format(now_str(), status_word)
     content = "\n".join(lines)
     print("\n" + title + "\n" + content)
-    send_notification(content, title=title)
+    _report(
+        level,
+        title,
+        content,
+        {"total": total, "success": success, "failed": failed, "details": detail_items},
+    )
     if failed:
         sys.exit(1)
 
