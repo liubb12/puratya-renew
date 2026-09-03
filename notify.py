@@ -18,6 +18,11 @@ import urllib.request
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "http://127.0.0.1:43147/api/notify")
 NOTIFY_TOKEN = os.environ.get("NOTIFY_TOKEN", "")
 
+# 网关域挂在 Cloudflare 后，urllib 默认 UA 会被 CF 拦成 403 error 1010，
+# 必须伪装成浏览器 UA。
+NOTIFY_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
 
 def notify(title, content, level="success", details=None, source="puratya-renew"):
     payload = {
@@ -34,6 +39,7 @@ def notify(title, content, level="success", details=None, source="puratya-renew"
         headers={
             "Authorization": "Bearer {}".format(NOTIFY_TOKEN),
             "Content-Type": "application/json",
+            "User-Agent": NOTIFY_UA,
         },
         method="POST",
     )
