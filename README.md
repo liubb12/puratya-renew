@@ -13,7 +13,9 @@ POST /api/bots/{id}/renew     # Bot 续期
 POST /api/sites/{id}/renew    # 网站续期
 ```
 
-脚本每周一、三、五定时跑一次，把账号下所有 Bot / 网站全部续期，然后通过 `notify.py`（Telegram + SMTP 双通道）通知你结果。
+脚本每周一、三、五定时跑一次，把账号下所有 Bot / 网站全部续期，然后通过 **notify-gateway**（[2Bdou/notify-gateway](https://github.com/2Bdou/notify-gateway)）统一上报结果，网关再把通知发到你的邮件 + Telegram。
+
+> 通知通道（SMTP / Telegram）收件人统一在网关后台配置，本仓库**不**内置、也**不**配 SMTP / Bot Token / 收件人。只需给网关上报地址和 Key。
 
 ## 用法（3 步）
 
@@ -25,14 +27,15 @@ POST /api/sites/{id}/renew    # 网站续期
 
 进入你的仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**，填：
 
-| Name                  | 值                                                                                   | 必填 |
-| --------------------- | ------------------------------------------------------------------------------------ | ---- |
-| `MWS_TOKEN`           | 你的登录 token（下面教你怎么拿）                                                       | ✅   |
-| `TELEGRAM_BOT_TOKEN`  | Telegram Bot token（找 [@BotFather](https://t.me/BotFather) `/newbot`）               | 可选 |
-| `TELEGRAM_CHAT_ID`    | Telegram 你的 ID（找 [@userinfobot](https://t.me/userinfobot)）                        | 可选 |
-| `SMTP_CONFIG`         | 邮件通知，一个 JSON（见 [NOTIFY.md](NOTIFY.md)）                                       | 可选 |
+| Name           | 值                                   | 必填 |
+| -------------- | ------------------------------------ | ---- |
+| `MWS_TOKEN`    | 你的登录 token（下面教你怎么拿）       | ✅   |
+| `NOTIFY_URL`   | 通知网关上报地址（以 `/api/notify` 结尾） | ✅   |
+| `NOTIFY_TOKEN` | 网关里该项目分配的独立 Key           | ✅   |
 
-> 通知是**双通道平行**：TG 和邮件都配了就都发，配哪个用哪个，一个不配不影响另一个；都不配也能正常续期，只是没通知。详细配置（含 SMTP JSON 格式、TG 兼容命名 `TG_BOT_TOKEN`/`TG_CHAT_ID`）见 [NOTIFY.md](NOTIFY.md)。
+> `NOTIFY_URL` / `NOTIFY_TOKEN` 在网关后台 **项目详情页** 复制（网关的部署、SMTP / Telegram 配置见 [notify-gateway](https://github.com/2Bdou/notify-gateway) 的 README）。一个续期仓库对应网关里的一个项目，各用一把 Key。
+>
+> 通知通道最终能不能发出去，取决于网关里该项目开关和网关设置页有没有配 SMTP / Telegram。**配好网关前也能正常续期**，只是没有通知。
 
 ### 3. 手动跑一次验证
 
@@ -49,7 +52,7 @@ POST /api/sites/{id}/renew    # 网站续期
 
 ## ⚠️ Token 有效期
 
-`MWS_TOKEN` 是个 JWT，**约 26 天后过期**。过期后脚本会检测到并给你发通知（如果配了通知），你重新抓一次新 token 更新到 Secret 即可。不配通知的话，记得每 3~4 周自己来换一次。
+`MWS_TOKEN` 是个 JWT，**约 26 天后过期**。过期后脚本会检测到，向网关上报一条 `token 已失效` 的失败通知，你重新抓一次新 token 更新到 Secret 即可。
 
 ## 改运行时间
 
