@@ -1,36 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MWS (cloud.puratya.com) 自动续期脚本
-
+MWS (cloud.m-ws.cc) 自动续期脚本
 原理：MWS 的 Bot/Site 有 7 天倒计时，到期自动停止。
      点一次 Renew 按钮 = POST /api/bots/{id}/renew，把倒计时重置回 7 天。
      本脚本每周一、三、五跑一次，把所有 Bot/Site 全部续期，永不停止。
-
 登录态：__Host-mrtcloud_token（JWT，约 26 天有效，过期需重新登录抓取）
-
 通知：走 notify-gateway（notify.py 上报结构化结果，网关统一发邮件 + Telegram）。
      仓库只需配 NOTIFY_URL / NOTIFY_TOKEN，不内置 SMTP / TG。
 依赖：requests（pip install requests）
 """
-
 import os
 import sys
 import json
 import urllib.error
 from datetime import datetime
-
 import requests
-
 from notify import notify
-
-API = "https://cloud.puratya.com/api"
-
+API = "https://cloud.m-ws.cc/api"
 # Cloudflare 对 Python 默认 UA 返回 403 (error 1010)，需伪装成浏览器
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-
 def http(path, method="GET", token=None):
     """请求 API，返回 (status_code, body)。网络异常返回 (0, 错误信息)。"""
     headers = {"User-Agent": UA}
@@ -43,13 +33,9 @@ def http(path, method="GET", token=None):
         return resp.status_code, resp.text
     except requests.RequestException as e:
         return 0, str(e)
-
-
 def now_str():
     """本地时间（workflow 里设 TZ=Asia/Shanghai 则显示北京时间）。"""
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
-
-
 def collect(token):
     """拉取所有 Bot / Site，返回 [(kind, id, name, remaining_hours), ...]。"""
     items = []
@@ -71,15 +57,11 @@ def collect(token):
             rem = timer.get("remaining_hours")
             items.append((kind, oid, name, rem))
     return items
-
-
 def renew_one(token, kind, oid):
     """续期单个对象，返回 (ok, status, body)。"""
     path = "/bots/{}/renew".format(oid) if kind == "Bot" else "/sites/{}/renew".format(oid)
     status, body = http(path, method="POST", token=token)
     return (status == 200), status, body
-
-
 def _report(level, title, content, details):
     """上报 notify-gateway；失败只打日志，不阻断续期主流程。"""
     try:
@@ -89,19 +71,16 @@ def _report(level, title, content, details):
         print("::warning::通知上报失败 HTTP {}: {}".format(e.code, body))
     except Exception as e:
         print("::warning::通知上报失败: {}".format(e))
-
-
 def main():
     token = os.environ.get("MWS_TOKEN", "").strip()
     if not token:
         print("[✗] 环境变量 MWS_TOKEN 未设置")
         sys.exit(1)
-
     # 0) 验证 token 有效性
     status, body = http("/auth/me", token=token)
     if status == 401:
         title = "⚠️ MWS token 已失效 ({})".format(now_str())
-        content = ("请重新登录 cloud.puratya.com，F12 抓取 __Host-mrtcloud_token，"
+        content = ("请重新登录 cloud.m-ws.cc，F12 抓取 __Host-mrtcloud_token，"
                    "更新到 GitHub Secret MWS_TOKEN")
         print(title)
         print(content)
@@ -110,13 +89,11 @@ def main():
     if status != 200:
         print("[✗] 验证 token 异常: HTTP {} {}".format(status, body))
         sys.exit(1)
-
     try:
         who = json.loads(body).get("username")
     except (json.JSONDecodeError, AttributeError):
         who = "?"
     print("[✓] 登录有效: {}".format(who))
-
     # 1) 拉取并续期
     items = collect(token)
     if not items:
@@ -124,7 +101,6 @@ def main():
         print(title)
         _report("success", title, "账号下没有 Bot / Site，跳过。", None)
         return
-
     lines = []
     failed = 0
     detail_items = []
@@ -149,7 +125,6 @@ def main():
                                  "error": "HTTP {} {}".format(status, body.strip())})
             failed += 1
             print("[✗] {} {} (id:{}) 续期失败 HTTP {}".format(kind, name, oid, status))
-
     # 2) 汇总 + 通知
     total = len(items)
     success = total - failed
@@ -166,7 +141,5 @@ def main():
     )
     if failed:
         sys.exit(1)
-
-
 if __name__ == "__main__":
     main()
