@@ -77,14 +77,11 @@ def init_browser(token):
     co.set_argument("--window-size=1280,800")
     co.set_argument("--disable-features=IsolateOrigins,site-per-process")
     co.set_user_agent(UA)
-    # 移除 webdriver 标记
     co.set_argument("--disable-infobars")
     co.set_argument("--start-maximized")
 
     page = ChromiumPage(co)
-    # 先访问主页建立上下文
     page.get(BASE_URL)
-    # 注入 token cookie
     page.run_cdp(
         "Network.setCookie",
         name="__Host-mrtcloud_token",
@@ -94,21 +91,14 @@ def init_browser(token):
         secure=True,
         httpOnly=True,
     )
-    # 刷新让 cookie 生效
     page.get(BASE_URL)
     time.sleep(3)
-    # 再访问 bots 页面建立正确的 Referer
     page.get(BASE_URL + "/bots")
     time.sleep(3)
     return page
 
 
 def renew_via_browser_fetch(page, kind, oid):
-    """
-    通过已过盾的浏览器上下文直接发起 fetch 请求调用续期接口，
-    先导航到对应页面建立正确的 Referer，然后带上完整 headers。
-    """
-    # 先导航到具体的 bot/site 页面，让浏览器建立正确的 Referer 和上下文
     page_url = "{}/{}".format(BASE_URL, "bots" if kind == "Bot" else "sites")
     try:
         page.get(page_url)
@@ -151,10 +141,6 @@ def renew_via_browser_fetch(page, kind, oid):
 
 
 def renew_via_dom_click(page, kind, oid):
-    """
-    DOM 点击续期 fallback 方案：导航到具体页面，找到续期按钮并点击。
-    """
-    # 导航到详情页
     detail_path = "{}/{}/{}".format(BASE_URL, "bots" if kind == "Bot" else "sites", oid)
     try:
         page.get(detail_path)
@@ -162,7 +148,6 @@ def renew_via_dom_click(page, kind, oid):
     except Exception as e:
         return False, 500, "无法访问详情页: {}".format(e)
 
-    # 尝试多种续期按钮选择器
     selectors = [
         'text("续期")',
         'text("延长")',
@@ -171,9 +156,6 @@ def renew_via_dom_click(page, kind, oid):
         'text("延長")',
         'css("[data-action*=renew]")',
         'css("[data-action*=extend]")',
-        'css("button:has-text(续期)")',
-        'css("button:has-text(延长)")',
-        'css("button:has-text(延長)")',
     ]
 
     for sel in selectors:
@@ -182,13 +164,11 @@ def renew_via_dom_click(page, kind, oid):
             if btn:
                 btn.click()
                 time.sleep(2)
-                # 检查是否有确认弹窗
                 confirm_selectors = [
                     'text("确认")',
                     'text("Confirm")',
                     'text("OK")',
                     'css(".ant-btn-primary")',
-                    'css("button.confirm")',
                 ]
                 for cs in confirm_selectors:
                     try:
@@ -265,9 +245,7 @@ def main():
         resp_body = ""
 
         if page:
-            # 先尝试 fetch 方式
             ok, status, resp_body = renew_via_browser_fetch(page, kind, oid)
-            # 如果 fetch 失败，尝试 DOM 点击方式
             if not ok:
                 print("[!] fetch 续期失败，尝试 DOM 点击...")
                 ok, status, resp_body = renew_via_dom_click(page, kind, oid)
@@ -297,8 +275,11 @@ def main():
     level = "success" if failed == 0 else "partial"
     status_word = "完成" if failed == 0 else "部分失败"
     title = "MWS 续期报告 ({}) · {}".format(now_str(), status_word)
-    content = "\n".join(lines)
-    print("\n" + title + "\n" + content)
+    content = "
+".join(lines)
+    print("
+" + title + "
+" + content)
 
     _report(
         level,
