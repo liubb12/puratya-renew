@@ -106,20 +106,21 @@ def init_browser(token):
 
 
 def find_renew_btn_for_name(page, name):
-    """纯 Python 定位包含指定实例名称卡片中的「延長」按钮"""
+    """精准查找包含指定 Bot/Site 名称的卡片内的「延長」按钮"""
     try:
-        cards = page.eles(f"xpath://*[contains(text(), '{name}')]/ancestor::div")
-        for card in cards:
-            btn = card.ele("xpath:.//button[contains(., '延長')]", timeout=1)
-            if btn:
-                return btn
-    except Exception:
-        pass
-    # 兜底：直接在全局找包含延长文案的按钮
-    try:
-        for b in page.eles("xpath://button[contains(., '延長')]"):
-            if name in b.inner_html or (b.parent(3) and name in b.parent(3).inner_html):
-                return b
+        # 获取页面上所有的「延長」按钮
+        all_btns = page.eles("xpath://button[contains(., '延長')]")
+        for btn in all_btns:
+            # 向上寻找其父容器，看容器里是否包含了目标名称
+            parent = btn.parent()
+            for _ in range(5):
+                if parent:
+                    text = parent.text or ""
+                    if name in text:
+                        return btn
+                    parent = parent.parent()
+                else:
+                    break
     except Exception:
         pass
     return None
