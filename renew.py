@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-MWS (cloud.m-ws.cc) 自动续期脚本 (支持 Cloudflare Turnstile 自动过盾)
+MWS (cloud.m-ws.cc) 自动续期脚本 (浏览器直连 API 版，完美绕过 UI 元素查找)
 依赖：pip install requests DrissionPage
 """
 import os
@@ -66,20 +66,6 @@ def collect(token):
     return items
 
 
-def safe_click(ele):
-    if not ele:
-        return False
-    try:
-        ele.click(by_js=False)
-        return True
-    except Exception:
-        try:
-            ele.click(by_js=True)
-            return True
-        except Exception:
-            return False
-
-
 def init_browser(token):
     from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -105,91 +91,37 @@ def init_browser(token):
     return page
 
 
-def find_renew_btn_for_name(page, name):
-    """精准查找包含指定 Bot/Site 名称的卡片内的「延長」按钮"""
+def renew_via_browser_fetch(page, kind, oid):
+    """
+    通过已过盾的浏览器上下文直接发起 fetch 请求调用续期接口，
+    这样既能带上 Cloudflare 的 Cookie/Session 凭证，又不需要在页面上找按钮。
+    """
+    api_path = f"/api/bots/{oid}/renew" if kind == "Bot" else f"/api/sites/{oid}/renew"
+    js_script = f"""
+    async () => {{
+        try {{
+            const resp = await fetch('{api_path}', {{
+                method: 'POST',
+                headers: {{
+                    'Content-Type': 'application/json'
+                }}
+            }});
+            const text = await resp.text();
+            return {{ status: resp.status, body: text }};
+        } catch (e) {{
+            return {{ status: 0, body: e.toString() }};
+        }}
+    }}
+    """
     try:
-        # 获取页面上所有的「延長」按钮
-        all_btns = page.eles("xpath://button[contains(., '延長')]")
-        for btn in all_btns:
-            # 向上寻找其父容器，看容器里是否包含了目标名称
-            parent = btn.parent()
-            for _ in range(5):
-                if parent:
-                    text = parent.text or ""
-                    if name in text:
-                        return btn
-                    parent = parent.parent()
-                else:
-                    break
-    except Exception:
-        pass
-    return None
-
-
-def renew_via_browser(page, token, kind, oid, name):
-    try:
-        before_items = {
-            (k, i): r for k, i, _, r in collect(token) if i is not None
-        }
-        before_rem = before_items.get((kind, oid))
-
-        api_target = f"/api/bots/{oid}/renew" if kind == "Bot" else f"/api/sites/{oid}/renew"
-        page.listen.start(api_target)
-
-        page.get(BASE_URL)
-        time.sleep(4)
-
-        if kind == "Site":
-            for nav in page.eles("xpath://*[contains(text(), 'Web')]"):
-                if safe_click(nav):
-                    time.sleep(2)
-                    break
-
-        renew_btn = find_renew_btn_for_name(page, name)
-        if not renew_btn:
-            page.listen.stop()
-            return False, 0, f"页面未找到 {name} 的「延長」按钮"
-
-        safe_click(renew_btn)
-        print(f"[*] 已点击 {name} 的「延長」按钮，等待 Cloudflare Turnstile 验证...")
-
-        start_t = time.time()
-        last_err_body = ""
-        while time.time() - start_t < 30:
-            pkt = page.listen.wait(timeout=2)
-            if pkt and pkt.response:
-                status = pkt.response.status
-                body = pkt.response.raw_body
-                if status == 200:
-                    page.listen.stop()
-                    return True, 200, str(body)
-                else:
-                    last_err_body = f"HTTP {status} {body}"
-
-            try:
-                cf_iframe = page.ele("xpath://iframe[contains(@src, 'challenges.cloudflare.com')]", timeout=1)
-                if cf_iframe:
-                    cf_iframe.click.at(offset_x=35, offset_y=32)
-            except Exception:
-                pass
-
-        page.listen.stop()
-
-        after_items = {
-            (k, i): r for k, i, _, r in collect(token) if i is not None
-        }
-        after_rem = after_items.get((kind, oid))
-        if before_rem is not None and after_rem is not None and after_rem > before_rem:
-            return True, 200, "通过时长比对确认续期成功"
-
-        return False, 403, last_err_body or "Cloudflare Turnstile 验证超时或未通过"
-
+        res = page.run_js(js_script)
+        if res and isinstance(res, dict):
+            status = res.get("status", 0)
+            body = res.get("body", "")
+            return status == 200, status, body
+        return False, 0, "JS 执行未返回有效结果"
     except Exception as e:
-        try:
-            page.listen.stop()
-        except Exception:
-            pass
-        return False, 500, f"浏览器执行异常: {e}"
+        return False, 500, str(e)
 
 
 def _report(level, title, content, details):
@@ -232,6 +164,9 @@ def main():
     page = None
     try:
         page = init_browser(token)
+        # 访问一次主站以确保 Cloudflare 验证通过、Cookie 生效
+        page.get(BASE_URL)
+        time.sleep(5)
     except Exception as e:
         print(f"[!] 浏览器启动失败: {e}")
 
@@ -247,9 +182,9 @@ def main():
             continue
 
         if page:
-            ok, status, body = renew_via_browser(page, token, kind, oid, name)
+            ok, status, resp_body = renew_via_browser_fetch(page, kind, oid)
         else:
-            ok, status, body = False, 500, "浏览器未成功初始化"
+            ok, status, resp_body = False, 500, "浏览器未成功初始化"
 
         rem_txt = f"，续期前剩 {int(rem)}h" if rem is not None else ""
         if ok:
@@ -258,10 +193,10 @@ def main():
             detail_items.append({"id": str(oid), "name": name, "status": "success", "message": msg})
             print(f"[✓] {kind} {name} (id:{oid}) 续期成功{rem_txt}")
         else:
-            lines.append(f"  · {kind} {name}：续期失败 HTTP {status} {body.strip()}")
-            detail_items.append({"id": str(oid), "name": name, "status": "failed", "error": f"HTTP {status} {body.strip()}"})
+            lines.append(f"  · {kind} {name}：续期失败 HTTP {status} {resp_body.strip()}")
+            detail_items.append({"id": str(oid), "name": name, "status": "failed", "error": f"HTTP {status} {resp_body.strip()}"})
             failed += 1
-            print(f"[✗] {kind} {name} (id:{oid}) 续期失败 HTTP {status} {body.strip()}")
+            print(f"[✗] {kind} {name} (id:{oid}) 续期失败 HTTP {status}")
 
     if page:
         try:
