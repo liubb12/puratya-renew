@@ -75,10 +75,16 @@ def init_browser(token):
     co.set_argument("--disable-dev-shm-usage")
     co.set_argument("--disable-blink-features=AutomationControlled")
     co.set_argument("--window-size=1280,800")
+    co.set_argument("--disable-features=IsolateOrigins,site-per-process")
     co.set_user_agent(UA)
+    # 移除 webdriver 标记
+    co.set_argument("--disable-infobars")
+    co.set_argument("--start-maximized")
 
     page = ChromiumPage(co)
+    # 先访问主页建立上下文
     page.get(BASE_URL)
+    # 注入 token cookie
     page.run_cdp(
         "Network.setCookie",
         name="__Host-mrtcloud_token",
@@ -88,23 +94,42 @@ def init_browser(token):
         secure=True,
         httpOnly=True,
     )
+    # 刷新让 cookie 生效
+    page.get(BASE_URL)
+    time.sleep(3)
+    # 再访问 bots 页面建立正确的 Referer
+    page.get(BASE_URL + "/bots")
+    time.sleep(3)
     return page
 
 
 def renew_via_browser_fetch(page, kind, oid):
     """
     通过已过盾的浏览器上下文直接发起 fetch 请求调用续期接口，
-    避开所有 UI 元素查找。
+    先导航到对应页面建立正确的 Referer，然后带上完整 headers。
     """
+    # 先导航到具体的 bot/site 页面，让浏览器建立正确的 Referer 和上下文
+    page_url = "{}/{}".format(BASE_URL, "bots" if kind == "Bot" else "sites")
+    try:
+        page.get(page_url)
+        time.sleep(1)
+    except Exception:
+        pass
+
     api_path = "/api/bots/{}/renew".format(oid) if kind == "Bot" else "/api/sites/{}/renew".format(oid)
-    js_script = """
+    js_script = r"""
     async () => {
         try {
             const resp = await fetch('%s', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json'
-                }
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json, text/plain, */*',
+                    'Origin': '%s',
+                    'Referer': '%s',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                credentials: 'include'
             });
             const text = await resp.text();
             return { status: resp.status, body: text };
@@ -112,7 +137,7 @@ def renew_via_browser_fetch(page, kind, oid):
             return { status: 0, body: e.toString() };
         }
     }
-    """ % api_path
+    """ % (api_path, BASE_URL, page_url + "/")
 
     try:
         res = page.run_js(js_script)
@@ -123,6 +148,62 @@ def renew_via_browser_fetch(page, kind, oid):
         return False, 0, "JS 执行未返回有效结果"
     except Exception as e:
         return False, 500, str(e)
+
+
+def renew_via_dom_click(page, kind, oid):
+    """
+    DOM 点击续期 fallback 方案：导航到具体页面，找到续期按钮并点击。
+    """
+    # 导航到详情页
+    detail_path = "{}/{}/{}".format(BASE_URL, "bots" if kind == "Bot" else "sites", oid)
+    try:
+        page.get(detail_path)
+        time.sleep(3)
+    except Exception as e:
+        return False, 500, "无法访问详情页: {}".format(e)
+
+    # 尝试多种续期按钮选择器
+    selectors = [
+        'text("续期")',
+        'text("延长")',
+        'text("Renew")',
+        'text("Extend")',
+        'text("延長")',
+        'css("[data-action*=renew]")',
+        'css("[data-action*=extend]")',
+        'css("button:has-text(续期)")',
+        'css("button:has-text(延长)")',
+        'css("button:has-text(延長)")',
+    ]
+
+    for sel in selectors:
+        try:
+            btn = page.ele(sel, timeout=2)
+            if btn:
+                btn.click()
+                time.sleep(2)
+                # 检查是否有确认弹窗
+                confirm_selectors = [
+                    'text("确认")',
+                    'text("Confirm")',
+                    'text("OK")',
+                    'css(".ant-btn-primary")',
+                    'css("button.confirm")',
+                ]
+                for cs in confirm_selectors:
+                    try:
+                        conf = page.ele(cs, timeout=1)
+                        if conf:
+                            conf.click()
+                            time.sleep(2)
+                            break
+                    except Exception:
+                        pass
+                return True, 200, "DOM 点击成功"
+        except Exception:
+            continue
+
+    return False, 404, "未找到续期按钮"
 
 
 def _report(level, title, content, details):
@@ -165,8 +246,6 @@ def main():
     page = None
     try:
         page = init_browser(token)
-        page.get(BASE_URL)
-        time.sleep(5)
     except Exception as e:
         print("[!] 浏览器启动失败: {}".format(e))
 
@@ -181,8 +260,17 @@ def main():
             failed += 1
             continue
 
+        ok = False
+        status = 0
+        resp_body = ""
+
         if page:
+            # 先尝试 fetch 方式
             ok, status, resp_body = renew_via_browser_fetch(page, kind, oid)
+            # 如果 fetch 失败，尝试 DOM 点击方式
+            if not ok:
+                print("[!] fetch 续期失败，尝试 DOM 点击...")
+                ok, status, resp_body = renew_via_dom_click(page, kind, oid)
         else:
             ok, status, resp_body = False, 500, "浏览器未成功初始化"
 
@@ -196,7 +284,7 @@ def main():
             lines.append("  · {} {}：续期失败 HTTP {} {}".format(kind, name, status, resp_body.strip()))
             detail_items.append({"id": str(oid), "name": name, "status": "failed", "error": "HTTP {} {}".format(status, resp_body.strip())})
             failed += 1
-            print("[✗] {} {} (id:{}) 续期失败 HTTP {}".format(kind, name, oid, status))
+            print("[✗] {} {} (id:{}) 续期失败 HTTP {} - {}".format(kind, name, oid, status, resp_body[:100]))
 
     if page:
         try:
